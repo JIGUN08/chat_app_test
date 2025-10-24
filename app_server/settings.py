@@ -77,6 +77,8 @@ REST_FRAMEWORK = {
     )
 }
 
+ASGI_APPLICATION = 'app_server.asgi.application'
+
 ROOT_URLCONF = 'app_server.urls'
 
 # 🚀 Redis URL이 정의된 경우 Channels Redis를 사용합니다.
