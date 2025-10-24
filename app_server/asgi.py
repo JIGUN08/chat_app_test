@@ -1,22 +1,31 @@
-# app_server/app_server/asgi.py
+"""
+ASGI config for app_server project.
+
+It exposes the ASGI callable as a module-level variable named ``application``.
+
+For more information on this file, see
+https://docs.djangoproject.com/en/5.0/howto/deployment/asgi/
+"""
 
 import os
+
 from django.core.asgi import get_asgi_application
-
-# 💡 1. Django 설정 초기화 (이 부분이 핵심)
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app_server.settings')
-django_asgi_app = get_asgi_application() 
-
-
-from channels.auth import AuthMiddlewareStack
 from channels.routing import ProtocolTypeRouter, URLRouter
-import api.routing # api/routing.py에서 WebSocket URL 패턴을 가져옵니다.
+from channels.auth import AuthMiddlewareStack
+import api.routing # api 앱의 WebSocket URL 라우팅을 임포트
 
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app_server.settings')
+
+# Django의 기본 HTTP 요청 처리를 위한 ASGI 애플리케이션
+django_asgi_app = get_asgi_application()
+
+# ProtocolTypeRouter는 HTTP와 WebSocket 요청을 분리하여 처리합니다.
 application = ProtocolTypeRouter({
-    # 💡 HTTP 요청 (REST API)은 Django의 기본 ASGI 핸들러로 라우팅
+    # HTTP 요청은 Django의 기본 ASGI 핸들러로 전달
     "http": django_asgi_app,
-    
-    # 💡 WebSocket 요청은 인증 미들웨어를 거쳐 ChatConsumer로 라우팅
+
+    # WebSocket 요청은 AuthMiddlewareStack을 통과한 후 URLRouter로 전달
+    # AuthMiddlewareStack은 Django의 세션/인증 정보를 WebSocket 범위로 가져옵니다.
     "websocket": AuthMiddlewareStack(
         URLRouter(
             api.routing.websocket_urlpatterns
