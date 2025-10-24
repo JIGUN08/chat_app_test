@@ -9,12 +9,12 @@ https://docs.djangoproject.com/en/5.0/howto/deployment/asgi/
 
 import os
 
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app_server.settings')
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 import api.routing # api 앱의 WebSocket URL 라우팅을 임포트
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app_server.settings')
 
 # Django의 기본 HTTP 요청 처리를 위한 ASGI 애플리케이션
 django_asgi_app = get_asgi_application()
