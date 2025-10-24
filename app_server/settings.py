@@ -64,7 +64,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:8000',
     'http://127.0.0.1',
     # Render URL을 포함하도록 설정
-    os.environ.get('RENDER_EXTERNAL_HOSTNAME', '')
+    'https://' + os.environ.get('RENDER_EXTERNAL_HOSTNAME', ''),
 ]
 
 REST_FRAMEWORK = {
