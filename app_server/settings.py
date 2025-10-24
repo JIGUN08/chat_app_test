@@ -11,11 +11,12 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 from datetime import timedelta 
 import os
-
+import dj_database_url
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv() 
 
+REDIS_URL = os.environ.get("REDIS_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 
 
@@ -30,10 +31,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-o51sdqp4+z@uj02rjcn-&8&8mguv*aah@cgu&0ep9i2-jk$j%3'
 
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['chat-app-test-4ow2.onrender.com']
 
 
 # Application definition
@@ -54,6 +56,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -70,6 +73,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://localhost:8000', # 또는 본인이 사용하는 포트
     'http://127.0.0.1:8000',
     'http://127.0.0.1',
+    os.environ.get('RENDER_EXTERNAL_HOSTNAME', '')
 ]
 
 REST_FRAMEWORK = {
@@ -83,14 +87,23 @@ REST_FRAMEWORK = {
 
 ROOT_URLCONF = 'app_server.urls'
 
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
-        "CONFIG": {
-            "hosts": [("127.0.0.1", 6379)],
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
+            "CONFIG": {
+                # 환경 변수 REDIS_URL을 사용하여 hosts를 설정합니다.
+                "hosts": [REDIS_URL],
+            },
         },
-    },
-}
+    }
+else:
+    # REDIS_URL이 없는 경우 (개발 환경 등) 기본 인메모리 채널 레이어를 사용합니다.
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        },
+    }
 
 TEMPLATES = [
     {
@@ -114,9 +127,9 @@ WSGI_APPLICATION = 'app_server.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    'default': dj_database_url.config(
+        default='sqlite:///' + os.path.join(BASE_DIR, 'db.sqlite3'),
+        conn_max_age=600
     }
 }
 
