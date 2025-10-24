@@ -25,7 +25,7 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-o51sdqp4+z@uj02rjcn-&
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
 
 # ALLOWED_HOSTS는 Render 서비스 URL을 포함하도록 환경 변수를 사용하거나 와일드카드를 사용합니다.
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['chat-app-test-4ow2.onrender.com']
 
 
 # Application definition
@@ -65,7 +65,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:8000',
     'http://127.0.0.1',
     # Render URL을 포함하도록 설정
-    'https://' + os.environ.get('RENDER_EXTERNAL_HOSTNAME', ''),
+    'https://*.onrender.com'
 ]
 
 REST_FRAMEWORK = {
