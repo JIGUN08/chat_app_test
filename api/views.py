@@ -173,6 +173,10 @@ class RegisterView(APIView):
                 {"message": "회원가입이 성공적으로 완료되었습니다."},
                 status=status.HTTP_201_CREATED
             )
+        else:
+            print("❌ Register Error:", serializer.errors)  # ← 이 줄 추가
+            print("📦 Received data:", request.data)        # ← 이 줄 추가
+            return Response(serializer.errors, status=400)
 
       
         # 4. 데이터 유효성 실패 응답
