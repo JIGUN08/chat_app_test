@@ -1,43 +1,96 @@
-#app_server/services/emotion_service.py
+# app_server/services/emotion_service.py
 
 import os
-import torch
-from transformers import pipeline
+import json
+import re
+from openai import OpenAI
+
+# OpenAI 클라이언트 초기화
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 class EmotionAnalyzer:
     """
-    Hugging Face의 사전 훈련된 모델을 사용하여 감정 분석을 수행하는 클래스.
-    모델 로딩은 리소스가 많이 소모되므로, 클래스 인스턴스 생성 시 한 번만 수행됩니다.
+    기존 구조 그대로 유지.
+    GPT 모델을 내부적으로 사용해 감정 점수를 계산하는 클래스.
     """
     def __init__(self):
-        self.classifier = None
-        try:
-            self.classifier = pipeline("text-classification", model="dlckdfuf141/korean-emotion-kluebert-v2", top_k=None)
-            print("--- EmotionAnalyzer model loaded successfully. ---")
-        except Exception as e:
-            print(f"--- Failed to load EmotionAnalyzer model: {e} ---")
+        self.classifier = True  # 기존 호환성 유지를 위해 더미 값 유지
+        print("--- EmotionAnalyzer (GPT API version) initialized successfully. ---")
 
     def analyze(self, text: str):
         """
         주어진 텍스트의 감정을 분석하고, 모든 감정 레이블과 점수를 반환합니다.
+        반환 형식:
+        [
+            {"label": "0", "score": 0.05},
+            {"label": "1", "score": 0.10},
+            {"label": "2", "score": 0.07},
+            {"label": "3", "score": 0.15},
+            {"label": "4", "score": 0.40},
+            {"label": "5", "score": 0.18},
+            {"label": "6", "score": 0.05}
+        ]
         """
         if not self.classifier or not isinstance(text, str) or not text.strip():
             return []
-        
+
         try:
-            emotion_scores = self.classifier(text)[0]
-            emotion_scores.sort(key=lambda x: x['score'], reverse=True)
+            prompt = f"""
+            아래 문장의 감정을 각각의 점수(0~1)로 평가하세요.
+            가능한 감정은 다음 7가지입니다:
+            0: 공포, 1: 놀람, 2: 분노, 3: 슬픔, 4: 중립, 5: 행복, 6: 혐오
+
+            문장: "{text}"
+
+            각 감정에 대해 확률처럼 보이는 점수를 부여한 뒤,
+            아래 JSON 배열 형식으로 출력하세요.
+            예시:
+            [
+              {{"label": "0", "score": 0.05}},
+              {{"label": "1", "score": 0.12}},
+              {{"label": "2", "score": 0.08}},
+              {{"label": "3", "score": 0.20}},
+              {{"label": "4", "score": 0.40}},
+              {{"label": "5", "score": 0.10}},
+              {{"label": "6", "score": 0.05}}
+            ]
+            """
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "당신은 한국어 감정 분석 전문가입니다."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2
+            )
+
+            result_text = response.choices[0].message.content.strip()
+            json_match = re.search(r"\[.*\]", result_text, re.DOTALL)
+
+            if not json_match:
+                print(f"--- Invalid GPT response format: {result_text} ---")
+                return []
+
+            emotion_scores = json.loads(json_match.group())
+
+            # 점수 내림차순 정렬
+            emotion_scores.sort(key=lambda x: x["score"], reverse=True)
             return emotion_scores
+
         except Exception as e:
             print(f"--- Emotion analysis failed for text '{text}': {e} ---")
             return []
 
-# Django 앱이 로드될 때 단 하나의 분석기 인스턴스만 생성하고 재사용합니다.
+
+# ✅ Django 앱 로드 시 1회만 인스턴스 생성
 emotion_analyzer_instance = EmotionAnalyzer()
+
 
 def analyze_emotion(bot_message_text: str) -> str:
     """
-    AI의 메시지를 분석하여 모델이 예측한 최종 감정 라벨(문자열)을 반환합니다.
+    기존 analyze_emotion 로직도 그대로 유지.
+    GPT가 예측한 결과 중 가장 높은 감정 ID를 변환하여 반환.
     """
     default_model_label = "중립"
 
@@ -48,22 +101,19 @@ def analyze_emotion(bot_message_text: str) -> str:
             return default_model_label
 
         ID_TO_LABEL_MAP = {
-            0: '공포', 1: '놀람', 2: '분노', 3: '슬픔', 4: '중립', 5: '행복', 6: '혐오'
+            0: "공포", 1: "놀람", 2: "분노", 3: "슬픔",
+            4: "중립", 5: "행복", 6: "혐오"
         }
 
-        # 모델 결과에서 가장 확률이 높은 레이블(예: '3')을 가져옵니다.
-        top_label_str = emotion_results[0]['label']
-        
-        # 문자열 레이블을 정수로 변환합니다.
+        # 기존과 동일: 최고 점수의 레이블 선택
+        top_label_str = emotion_results[0]["label"]
         top_label_int = int(top_label_str)
-
-        # 맵을 사용해 최종 감정 문자열을 찾습니다.
         final_label = ID_TO_LABEL_MAP.get(top_label_int, default_model_label)
 
-        print(f"\n--- Emotion Analysis (Refactored) ---")
+        print(f"\n--- Emotion Analysis (GPT API, Original Structure) ---")
         print(f"Message: {bot_message_text}")
         print(f"Top Emotion ID: {top_label_int} -> Final Label: {final_label}")
-        print(f"---------------------------------")
+        print(f"---------------------------------------------")
 
         return final_label
 
