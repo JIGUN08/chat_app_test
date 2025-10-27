@@ -16,7 +16,7 @@ from services.ai_persona_service import AIPersonaService
 from services.emotion_service import analyze_emotion
 
 # ⭐️ [신규] context_service 임포트
-from ..services.context_service import search_activities_for_context, get_activity_recommendation
+from services.context_service import search_activities_for_context, get_activity_recommendation
 
 # ⭐️ [수정] DB에 이미지 URL 저장을 위해 필드 추가
 @database_sync_to_async
