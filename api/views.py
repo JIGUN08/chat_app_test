@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from django.core.cache import cache 
 
 # context_service 임포트
-from app_server.services.context_service import search_activities_for_context
+from services.context_service import search_activities_for_context
 
 User = get_user_model()
 
