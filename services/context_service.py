@@ -4,7 +4,7 @@ from datetime import timedelta
 from django.db.models import Count, Q
 from konlpy.tag import Okt
 from django.db.models import Count
-from ..models import UserActivity
+from api.models import UserActivity
 
 def get_user_place_preferences(user, category_keyword):
     """
