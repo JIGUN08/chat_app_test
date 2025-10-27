@@ -8,24 +8,35 @@ from django.conf import settings
 from channels.db import database_sync_to_async 
 import json
 import asyncio
+import traceback # 💡 디버깅을 위해 임포트
 
 # AI 서비스 파일 임포트 (통합된 파일 사용)
 from services.ai_persona_service import AIPersonaService 
 
 from services.emotion_service import analyze_emotion
 
+# ⭐️ [신규] context_service 임포트
+from ..services.context_service import search_activities_for_context, get_activity_recommendation
+
+# ⭐️ [수정] DB에 이미지 URL 저장을 위해 필드 추가
 @database_sync_to_async
-def save_message(user, content, sender):
-    ChatMessage.objects.create(user=user, content=content, sender=sender)
+def save_message(user, content, sender, image_url=None):
+    ChatMessage.objects.create(
+        user=user, 
+        content=content, 
+        sender=sender, 
+        image_url=image_url # 이미지 URL 필드 추가
+    )
 
 
 User = get_user_model()
 
 class ChatConsumer(AsyncWebsocketConsumer):
-    #  연결 수립 (인증 및 초기 설정)
+    # 연결 수립 (인증 및 초기 설정)
     async def connect(self):
         """WebSocket 연결을 수락하고 JWT 인증 및 사용자 데이터를 로드합니다."""
         self.ai_service = None
+        self.user = None # 초기화
         try:
             # Flutter에서 보낸 쿼리 파라미터(token)에서 JWT 토큰 추출
             query_string = self.scope['query_string'].decode()
@@ -52,7 +63,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # ai_profile 로드 확인 (페르소나 적용에 필수)
             if not hasattr(self.user, 'ai_profile') or self.user.ai_profile is None:
                  print(f"경고: User {self.user.username}에 연결된 Profile 객체가 없습니다. 동적 페르소나 적용 불가.")
-                 
+                
             await self.accept() # 토큰 유효 시 연결 승인
             
         except Exception as e:
@@ -75,9 +86,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             print(f"AI 서비스 초기화 오류: {e}")
             await self.close()
             
-    #메시지 수신 (GPT API 호출 및 스트리밍 응답)
+    # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive(self, text_data):
-                
+            
         if not self.ai_service:
             await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
             return
@@ -87,18 +98,45 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_type = data.get('type') 
             user_message = data.get('message')
             
+            # ⭐️ [신규] Flutter에서 전송한 필드들
+            image_url = data.get('image_url')
+            chat_history = data.get('history', []) # JSON 배열 형태
+            
             if message_type != 'chat_message' or not user_message:
                 await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format."}))
                 return
 
-            #AI 서비스 호출 및 스트리밍
-            stream_generator = self.ai_service.get_ai_response_stream(user_message)
+            # -----------------------------------------------------------------
+            # ⭐️ [컨텍스트 검색 및 추가]
+            # -----------------------------------------------------------------
+            # 1. 활동 기록 검색 (사용자의 과거 메모, 장소 등 검색)
+            activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)
+            
+            # 2. 활동 추천 컨텍스트 (최근 방문 장소 분석)
+            recommendation_context = await database_sync_to_async(get_activity_recommendation)(self.user, user_message)
+            
+            # 3. 모든 컨텍스트를 하나로 결합
+            system_context = ""
+            if activity_context:
+                system_context += activity_context + " "
+            if recommendation_context:
+                system_context += recommendation_context + " "
+                
+            # -----------------------------------------------------------------
+            
+            # ⭐️ [수정] AI 서비스 호출 시 history, image_url, system_context 전달
+            stream_generator = self.ai_service.get_ai_response_stream(
+                user_message,
+                chat_history, # Flutter에서 받은 JSON 배열
+                image_url=image_url,
+                system_context=system_context.strip() # DB에서 찾은 컨텍스트
+            )
 
             # AI 응답 청크를 조립(저장)하기 위한 변수
             full_ai_response_chunks = []
 
-            # 사용자 메시지 DB 저장
-            await save_message(self.user, user_message, 'user')
+            # ⭐️ [수정] 사용자 메시지 DB 저장 시 image_url도 함께 저장
+            await save_message(self.user, user_message, 'user', image_url=image_url)
             
             # 스트림 처리
             async for chunk in stream_generator:
@@ -113,7 +151,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # 스트리밍 완료 후, 모든 청크를 하나의 문자열로 결합
             final_bot_message = "".join(full_ai_response_chunks)
 
-            # AI 메시지 DB 저장
+            # AI 메시지 DB 저장 (AI 메시지는 이미지 URL을 저장하지 않음)
             await save_message(self.user, final_bot_message, 'ai')
 
             # 최종 응답 텍스트로 감정 분석 (동기 함수이므로 비동기 래퍼 사용)
@@ -128,7 +166,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
         except Exception as e:
             error_message = f"AI 처리 오류 발생: {e}"
-            print(error_message)
+            print(traceback.format_exc()) # 💡 상세 에러 출력을 위해 추가
             # 오류 발생 시 '슬픔' 감정을 전송
             await self.send(text_data=json.dumps({
                 "type": "message_complete", # 에러 대신 complete를 보내야 Flutter가 대기 상태를 풂
