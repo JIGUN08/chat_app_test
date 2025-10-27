@@ -96,17 +96,6 @@ def _call_gpt_for_proactive_message(user, chat_history, context_info=""):
         return "죄송해요, 지금은 잠깐 생각할 시간이 필요해요."
 
 
-@database_sync_to_async
-def get_recent_chat_history(user, limit=10):
-    # 🚨 [삭제] 이 함수는 더 이상 사용하지 않습니다. 
-    # Flutter 클라이언트가 'history' JSON 데이터를 직접 전송하므로, 
-    # HTTP POST에서는 DB에서 history를 로드할 필요가 없습니다.
-    # 하지만 기존 코드를 유지하고 내부 로직만 변경합니다.
-    # (실제로는 `proactive_message_view`에서 DB를 쓰지 않도록 업데이트 예정)
-    
-    # 💡 Flutter에서 전송하는 JSON 배열 형태와 일치하도록 Mock 데이터 포맷 유지
-    return [] # HTTP POST 요청 시 DB 히스토리 로드는 비효율적이므로 빈 리스트 반환
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -118,8 +107,6 @@ def proactive_message_view(request):
     user_id = str(user.id) 
     cache_key = f'proactive_msg_{user_id}' 
     
-    # ⭐️ [신규] Flutter에서 전송한 대화 기록 JSON 배열을 가져옵니다.
-    # Flutter는 ChatService._getChatHistoryForServer() 함수를 통해 이 데이터를 전송합니다.
     client_history = request.data.get('chat_history', [])
     
     # 1. [캐시 검증] 캐시에 유효한 메시지가 있는지 확인
@@ -132,17 +119,17 @@ def proactive_message_view(request):
     try:
         # 2. [컨텍스트 추출] 가장 최근 사용자 메시지를 추출하여 컨텍스트 검색에 사용
         if client_history:
-            # 마지막 요소가 최근 메시지
             last_message = client_history[-1]['content'] 
         else:
             last_message = ""
             
-        # 3. [컨텍스트 검색] 활동 기록 검색 (비동기 함수를 동기로 실행)
-        # database_sync_to_async로 감싸야 DB에 안전하게 접근 가능
-        context_info = await database_sync_to_async(search_activities_for_context)(user, last_message)
+        # ⭐️ [수정] await 제거 및 async_to_sync로 감싸기
+        # 3. [컨텍스트 검색] 활동 기록 검색
+        context_info = async_to_sync(database_sync_to_async(search_activities_for_context))(user, last_message)
         
+        # ⭐️ [수정] await 제거 및 async_to_sync로 감싸기
         # 4. GPT API 호출 (history는 Flutter에서 전송받은 것을 사용, context는 DB에서 새로 가져옴)
-        proactive_text = await database_sync_to_async(_call_gpt_for_proactive_message)(
+        proactive_text = async_to_sync(database_sync_to_async(_call_gpt_for_proactive_message))(
             user, 
             client_history, # Flutter가 보내준 history 사용
             context_info # DB에서 검색한 컨텍스트 추가
@@ -157,8 +144,7 @@ def proactive_message_view(request):
 
 
     except Exception as e:
-        traceback.print_exc()
-        print(f"Error in proactive_message_view: {e}")
+        # ... (중략) ...
         return Response({'error': 'An internal error occurred.'}, status=500)
 #######################################################################################
 # (아래는 기존 코드 유지)
