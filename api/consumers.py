@@ -134,14 +134,14 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
             #  Flutter에서 전송한 필드들
             image_base64 = data.get('image_base64')
-            chat_history = data.get('history', []) # JSON 배열 형태
+            chat_history = data.get('history', []) # JSON 배열 형태 (사용하지 않음)
             
             # 메시지 타입 및 내용 유효성 검사
             if message_type != 'chat_message' or not user_message:
                 if not image_base64: # 이미지도 메시지도 없으면 무시
                     await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format or empty message."}))
                     return
-            
+                
             
             # -----------------------------------------------------------------
             # [신규] Base64 이미지 처리 및 URL 획득
@@ -156,32 +156,36 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         image_base64
                     )
                     if not final_image_url:
-                         # 이미지 저장 실패는 여기서 처리하여 아래에서 raise Exception을 피함
+                          # 이미지 저장 실패는 여기서 처리하여 아래에서 raise Exception을 피함
                         print("이미지 저장/업로드 실패: URL이 반환되지 않았습니다.")
                         user_image_data_for_ai = None # AI에 전달할 데이터도 무효화
+                    
+                    # 💡 Base64 데이터를 전달하기 위해 user_image_data_for_ai만 AI 서비스에 사용합니다.
+                    
                 except Exception as e:
                     print(f"이미지 처리 과정 중 예외 발생: {e}")
                     # 예외 발생 시 크래시를 막고 None으로 처리하여 진행
                     final_image_url = None
                     user_image_data_for_ai = None
+                
             
-
             # -----------------------------------------------------------------
-            # [컨텍스트 검색 및 추가]
+            # [컨텍스트 검색 및 추가] - RAG Service로 통합되어 사용되지 않음
             # -----------------------------------------------------------------
+            
             # 1. 활동 기록 검색 (사용자의 과거 메모, 장소 등 검색)
             activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)         
             # 2. 활동 추천 컨텍스트 (최근 방문 장소 분석)
             recommendation_context = await database_sync_to_async(get_activity_recommendation)(self.user, user_message)
             
             # 3. 컨텍스트 조합 (LLM System Context에 추가될 부분)
+            # 이 코드는 AI Service 내부로 이동했기 때문에 더 이상 사용되지 않습니다.
             context_list = []
             if activity_context:
                 context_list.append(activity_context)
             if recommendation_context:
                 context_list.append(recommendation_context)
                 
-            # 최종 시스템 컨텍스트 문자열
             final_system_context = "\n".join(context_list)
             if final_system_context:
                 final_system_context = final_system_context.strip()
@@ -192,13 +196,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # [AI 서비스 호출 및 스트리밍]
             # -----------------------------------------------------------------
             
+            # 💡 [CRITICAL FIX] AIPersonaService.get_ai_response_stream의 시그니처 수정
+            # 1. chat_history (위치 인수) 제거: 서비스가 내부적으로 관리
+            # 2. system_context (키워드 인수) 제거: 서비스가 내부적으로 RAG 컨텍스트를 빌드
             stream_generator = self.ai_service.get_ai_response_stream(
-                user_message,
-                chat_history, # Flutter에서 받은 JSON 배열
-                # 💡 [FIX 1] 이미 초기화된 변수를 사용
-                image_base64=user_image_data_for_ai, # Base64 데이터 전달 
-                # 💡 [FIX 2] final_system_context가 None이면 strip()을 호출하지 않도록 처리
-                system_context=final_system_context 
+                user_message=user_message,
+                image_base64=user_image_data_for_ai # 이제 유일하게 남은 키워드 인수
             )
             
             # 사용자 메시지 DB 저장 시 image_url도 함께 저장 (이미지 처리가 성공했을 경우에만 URL이 존재)
