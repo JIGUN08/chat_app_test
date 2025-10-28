@@ -85,7 +85,7 @@ ROOT_URLCONF = 'app_server.urls'
 if REDIS_URL:
     CHANNEL_LAYERS = {
         "default": {
-            "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
                 # 환경 변수 REDIS_URL을 사용하여 hosts를 설정합니다.
                 # Redis URL이 'redis://...' 형식일 경우, channels_redis가 자동으로 파싱합니다.
