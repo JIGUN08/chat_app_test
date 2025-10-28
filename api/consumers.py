@@ -173,13 +173,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # [컨텍스트 검색 및 추가] - RAG Service로 통합되어 사용되지 않음
             # -----------------------------------------------------------------
             
-            # 1. 활동 기록 검색 (사용자의 과거 메모, 장소 등 검색)
+            # 이 컨텍스트 코드는 AI 서비스 내부로 이동했기 때문에 여기서 생성하더라도 전달하지 않습니다.
             activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)         
-            # 2. 활동 추천 컨텍스트 (최근 방문 장소 분석)
             recommendation_context = await database_sync_to_async(get_activity_recommendation)(self.user, user_message)
             
-            # 3. 컨텍스트 조합 (LLM System Context에 추가될 부분)
-            # 이 코드는 AI Service 내부로 이동했기 때문에 더 이상 사용되지 않습니다.
             context_list = []
             if activity_context:
                 context_list.append(activity_context)
@@ -199,9 +196,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # 💡 [CRITICAL FIX] AIPersonaService.get_ai_response_stream의 시그니처 수정
             # 1. chat_history (위치 인수) 제거: 서비스가 내부적으로 관리
             # 2. system_context (키워드 인수) 제거: 서비스가 내부적으로 RAG 컨텍스트를 빌드
+            # 3. 모든 인자를 키워드 인자로 명시하여 위치 충돌 방지
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message=user_message,
-                image_base64=user_image_data_for_ai # 이제 유일하게 남은 키워드 인수
+                image_base64=user_image_data_for_ai 
             )
             
             # 사용자 메시지 DB 저장 시 image_url도 함께 저장 (이미지 처리가 성공했을 경우에만 URL이 존재)
