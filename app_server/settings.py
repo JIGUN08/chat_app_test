@@ -16,6 +16,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv() 
 
+import dj_database_url
+
 # 환경 변수에서 Redis URL을 가져옵니다.
 REDIS_URL = os.environ.get("REDIS_URL")
 
