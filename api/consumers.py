@@ -15,7 +15,6 @@ import os
 from services.ai_persona_service import AIPersonaService 
 from services.emotion_service import analyze_emotion
 # context_service 임포트
-# NOTE: context_service가 정상 작동하려면 services.context_service 내에 konlpy 임포트가 없어야 합니다!
 from services.context_service import search_activities_for_context, get_activity_recommendation 
 
 # DB에 이미지 URL 저장을 위해 필드 추가
@@ -124,7 +123,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if not self.ai_service:
                 await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
                 return
-                
+            
+            # 💡 [FIX 1] UnboundLocalError 방지를 위해 변수 초기화
+            final_image_url = None
+            user_image_data_for_ai = None
+            
             data = json.loads(text_data)
             message_type = data.get('type') 
             user_message = data.get('message')
@@ -143,11 +146,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # -----------------------------------------------------------------
             # [신규] Base64 이미지 처리 및 URL 획득
             # -----------------------------------------------------------------
-            final_image_url = None
-            user_image_data_for_ai = None
+            
             if image_base64:
                 # 비동기로 DB/S3에 이미지를 저장하고 최종 URL과 Base64 데이터를 획득
                 try:
+                    # 💡 [FIX 1] 초기화된 변수에 할당
                     final_image_url, user_image_data_for_ai = await save_base64_image_and_get_url(
                         self.user.id, 
                         image_base64
@@ -179,19 +182,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 context_list.append(recommendation_context)
                 
             # 최종 시스템 컨텍스트 문자열
-            final_system_context = "\n".join(context_list) if context_list else None
+            final_system_context = "\n".join(context_list)
+            if final_system_context:
+                final_system_context = final_system_context.strip()
+            else:
+                final_system_context = None 
             
             # -----------------------------------------------------------------
             # [AI 서비스 호출 및 스트리밍]
             # -----------------------------------------------------------------
             
-            # 🚨 [CRITICAL FIX] 이전 코드에서 정의되지 않은 system_context를 사용하던 부분을 final_system_context로 교체
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message,
                 chat_history, # Flutter에서 받은 JSON 배열
-                image_base64=user_image_data_for_ai, # Base64 데이터 전달
-                # 새로 조합된 컨텍스트 전달 (없으면 None 전달)
-                system_context=final_system_context.strip() if final_system_context else None
+                # 💡 [FIX 1] 이미 초기화된 변수를 사용
+                image_base64=user_image_data_for_ai, # Base64 데이터 전달 
+                # 💡 [FIX 2] final_system_context가 None이면 strip()을 호출하지 않도록 처리
+                system_context=final_system_context 
             )
             
             # 사용자 메시지 DB 저장 시 image_url도 함께 저장 (이미지 처리가 성공했을 경우에만 URL이 존재)
