@@ -1,39 +1,33 @@
+#app_server/api/consumers.py
 from .models import ChatMessage
-from channels.generic.websocket import AsyncJsonWebsocketConsumer 
+
+from channels.generic.websocket import AsyncWebsocketConsumer
 from rest_framework_simplejwt.tokens import AccessToken
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from channels.db import database_sync_to_async 
 import json
 import asyncio
-import traceback
-import base64 
-import os
 
+# AI 서비스 파일 임포트 (통합된 파일 사용)
 from services.ai_persona_service import AIPersonaService 
-from services.emotion_service import analyze_emotion # <-- 여전히 임포트되어 있지만, 아래에서 호출되지 않음
-from services.context_service import search_activities_for_context, get_activity_recommendation 
 
+from services.emotion_service import analyze_emotion
 
 @database_sync_to_async
 def save_message(user, content, sender):
-    ChatMessage.objects.create(
-        user=user, 
-        content=content, 
-        sender=sender,
-    )
+    ChatMessage.objects.create(user=user, content=content, sender=sender)
+
 
 User = get_user_model()
 
-class ChatConsumer(AsyncJsonWebsocketConsumer):
-    # 연결 수립 (인증 및 초기 설정)
+class ChatConsumer(AsyncWebsocketConsumer):
+    #  연결 수립 (인증 및 초기 설정)
     async def connect(self):
+        """WebSocket 연결을 수락하고 JWT 인증 및 사용자 데이터를 로드합니다."""
         self.ai_service = None
-        self.user = None
-
-        # 1. 사용자 인증 및 연결 수락
         try:
-            # Query String에서 토큰 추출
+            # Flutter에서 보낸 쿼리 파라미터(token)에서 JWT 토큰 추출
             query_string = self.scope['query_string'].decode()
             if 'token=' not in query_string:
                 raise ValueError("토큰 쿼리 파라미터가 누락되었습니다.")
@@ -42,154 +36,108 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             if not token:
                 raise ValueError("토큰 없음")
 
-            # JWT 토큰 검증 및 사용자 ID 추출
+            # JWT 토큰 검증 및 사용자 로드
             access_token = AccessToken(token)
             user_id = access_token['user_id']
             
-            # DB에서 사용자 정보 로드
+            # 핵심: database_sync_to_async를 사용하여 DB에서 User 및 ai_profile 동시 로드
             self.user = await database_sync_to_async(
+                # select_related('ai_profile')를 사용하여 호감도 정보가 포함된 ai_profile Eager Loading
                 User.objects.select_related('ai_profile').get
                 )(pk=user_id)
             
             if not self.user.is_active:
                 raise ValueError("비활성화된 사용자")
+
+            # ai_profile 로드 확인 (페르소나 적용에 필수)
+            if not hasattr(self.user, 'ai_profile') or self.user.ai_profile is None:
+                 print(f"경고: User {self.user.username}에 연결된 Profile 객체가 없습니다. 동적 페르소나 적용 불가.")
+                 
+            await self.accept() # 토큰 유효 시 연결 승인
             
-            # 인증 및 활성화 성공 시 연결 승인
-            await self.accept() 
-
-        # 인증 과정 중 발생하는 모든 오류 (JWT 오류, DB 오류, ValueError 등) 처리
         except Exception as e:
-            print(f"WebSocket 인증 오류: {e}")
-            await self.close()
-            return # 함수 실행 중단
-
-        # 2. AI 클라이언트 및 세션 설정 (인증 성공 시만 이 블록에 진입)
-        if self.user is None:
-            print("WebSocket 연결 후, self.user가 None이어서 AI 서비스 초기화 실패.")
-            await self.close()
+            print(f"WebSocket 인증 실패: {e}")
+            await self.close(code=4000) # 인증 실패 시 연결 거부
             return
 
+        #AI 클라이언트 및 세션 설정
         try:
-            # AI 서비스 초기화
+            # settings에서 API Key 가져오기
             api_key = getattr(settings, 'OPENAI_API_KEY', None)
+            if not api_key:
+                # 테스트를 위해 .env 파일에서 가져오거나 설정에 추가되어야 함
+                print("OPENAI_API_KEY가 settings에 설정되지 않았습니다. API 호출은 실패할 수 있습니다.") 
             
-            # self.user가 None이 아님이 보장되므로 안전하게 접근 가능
+            # 로드된 self.user 객체를 서비스에 전달 (호감도 점수 포함)
             self.ai_service = AIPersonaService(self.user, api_key)
             print(f"WebSocket 연결 성공 및 서비스 초기화: User {self.user.username}")
-
         except Exception as e:
-            # AI 서비스 초기화 중 발생하는 오류 (ex: API 키 오류) 처리
-            print(f"AI 서비스 초기화 오류 (2단계): {e}")
+            print(f"AI 서비스 초기화 오류: {e}")
             await self.close()
-            return # 함수 실행 중단
             
-    # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
-    async def receive_json(self, content):
-        print(f"--- [DEBUG] RECEIVE_JSON START. Data: {content}")
-
+    #메시지 수신 (GPT API 호출 및 스트리밍 응답)
+    async def receive(self, text_data):
+                
+        if not self.ai_service:
+            await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
+            return
+            
         try:
-            if not self.ai_service:
-                await self.send_json({"type": "error", "message": "Service not initialized."})
-                return
-            
-            user_image_data_for_ai = None 
-            data = content 
+            data = json.loads(text_data)
             message_type = data.get('type') 
-            user_message = data.get('message') 
-            image_base64 = data.get('image_base64') 
-            chat_history = data.get('history', []) 
+            user_message = data.get('message')
             
-            # 1. 기본 유효성 검사
-            if message_type != 'chat_message' or (user_message is None and image_base64 is None):
-                await self.send_json({"type": "error", "message": "Invalid message format or empty message."})
+            if message_type != 'chat_message' or not user_message:
+                await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format."}))
                 return
 
-            # 2. 메시지/이미지 상태에 따른 변수 설정 (NoneType 방지)
-            user_message_to_save = None 
-            user_message_for_ai = None 
+            #AI 서비스 호출 및 스트리밍
+            stream_generator = self.ai_service.get_ai_response_stream(user_message)
 
-            if user_message and isinstance(user_message, str):
-                user_message_to_save = user_message
-                user_message_for_ai = user_message
-            elif image_base64:
-                user_message_to_save = "[이미지만 전송]"
-                user_message_for_ai = "" 
-            else:
-                await self.send_json({"type": "error", "message": "Message content missing."})
-                return
-            
-            # 3. Base64 이미지 데이터 정리
-            if image_base64:
-                clean_image_base64 = image_base64.strip() if isinstance(image_base64, str) else image_base64
-                if clean_image_base64 and clean_image_base64.lower() not in ('none', '없음'):
-                    user_image_data_for_ai = clean_image_base64
-            
-            # -----------------------------------------------------------------
-            # [AI 서비스 호출 및 스트리밍]
-            # -----------------------------------------------------------------
-            
-            # DB에 저장 (User Message)
-            await save_message(self.user, user_message_to_save, 'user')
-            print("--- [DEBUG] USER MESSAGE 1/5: SAVED.") 
+            # AI 응답 청크를 조립(저장)하기 위한 변수
+            full_ai_response_chunks = []
 
-            stream_generator = self.ai_service.get_ai_response_stream(
-                user_message=user_message_for_ai,
-                image_base64=user_image_data_for_ai,
-                history=chat_history
-            )
+            # 사용자 메시지 DB 저장
+            await save_message(self.user, user_message, 'user')
             
             # 스트림 처리
-            full_ai_response_chunks = []
             async for chunk in stream_generator:
-                await self.send_json({
+                await self.send(text_data=json.dumps({
                     "type": "chat_message",
                     "message": chunk
-                })
+                }))
+
+                # 서버에 청크 저장 (조립)
                 full_ai_response_chunks.append(chunk)
 
+            # 스트리밍 완료 후, 모든 청크를 하나의 문자열로 결합
             final_bot_message = "".join(full_ai_response_chunks)
-            print("--- [DEBUG] STREAMING 2/5: COMPLETE. Final message length:", len(final_bot_message))
 
-            # AI 응답 저장
-            if final_bot_message:
-                await save_message(self.user, final_bot_message, 'ai')
-                print("--- [DEBUG] AI MESSAGE 3/5: SAVED.") 
-            else:
-                print("Warning: Received empty response from AI service.")
+            # AI 메시지 DB 저장
+            await save_message(self.user, final_bot_message, 'ai')
+
+            # 최종 응답 텍스트로 감정 분석 (동기 함수이므로 비동기 래퍼 사용)
+            emotion_label = await database_sync_to_async(analyze_emotion)(final_bot_message)
                 
-            # -----------------------------------------------------------------
-            # [감정 분석 격리 - 임시로 호출 우회]
-            # -----------------------------------------------------------------
-            print("--- [DEBUG] STARTING EMOTION ANALYSIS 4/5: (SKIPPING CALL).") 
-            # emotion_label = await database_sync_to_async(analyze_emotion)(final_bot_message) # 실제 호출은 주석 처리
-            emotion_label = "기쁨" # 임시 더미 값 사용
-            print(f"--- [DEBUG] EMOTION ANALYSIS 4/5: COMPLETE. Label: {emotion_label} (DUMMY)") 
-            
-            # 완료 신호 전송
-            await self.send_json({
+            # 감정(emotion)이 포함된 응답 완료 신호 전송
+            await self.send(text_data=json.dumps({
                 "type": "message_complete",
-                "emotion": emotion_label
-            })
-            print("--- [DEBUG] MESSAGE_COMPLETE 5/5: SENT SUCCESSFULLY.") 
+                "emotion": emotion_label  # Flutter가 기다리던값
+            }))
 
+            
         except Exception as e:
-            print(f"--- [CRITICAL CONSUMER CRASH] Unhandled Exception in receive_json: ---")
-            print(traceback.format_exc()) 
-            
-            await self.send_json({ 
-                "type": "error",
-                "message": f"Server Error: {type(e).__name__}. Check console logs. Full Traceback printed on server."
-            })
-            await self.send_json({
-                "type": "message_complete",
+            error_message = f"AI 처리 오류 발생: {e}"
+            print(error_message)
+            # 오류 발생 시 '슬픔' 감정을 전송
+            await self.send(text_data=json.dumps({
+                "type": "message_complete", # 에러 대신 complete를 보내야 Flutter가 대기 상태를 풂
                 "emotion": "슬픔"
-            })
+            }))
 
+    # 💡 3. 연결 해제
     async def disconnect(self, close_code):
         """WebSocket 연결이 종료될 때 호출됩니다."""
-        if hasattr(self, 'user') and self.user is not None:
-             username = self.user.username
-        else:
-             username = 'Unknown (Auth Failed)'
-
+        # self.user가 connect에서 설정되지 않았을 경우를 대비
+        username = getattr(self, 'user', None).username if hasattr(self, 'user') else 'Unknown'
         print(f"WebSocket disconnected for User {username}. Code: {close_code}")
