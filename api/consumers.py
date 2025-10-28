@@ -1,4 +1,3 @@
-#app_server/api/consumers.py
 from .models import ChatMessage
 
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -8,7 +7,7 @@ from django.conf import settings
 from channels.db import database_sync_to_async 
 import json
 import asyncio
-import traceback #  디버깅을 위해 임포트
+import traceback # 디버깅을 위해 임포트
 import base64 
 import os
 
@@ -16,7 +15,8 @@ import os
 from services.ai_persona_service import AIPersonaService 
 from services.emotion_service import analyze_emotion
 # context_service 임포트
-from services.context_service import search_activities_for_context, get_activity_recommendation
+# NOTE: context_service가 정상 작동하려면 services.context_service 내에 konlpy 임포트가 없어야 합니다!
+from services.context_service import search_activities_for_context, get_activity_recommendation 
 
 # DB에 이미지 URL 저장을 위해 필드 추가
 @database_sync_to_async
@@ -27,6 +27,7 @@ def save_message(user, content, sender, image_url=None):
         sender=sender, 
         image_url=image_url # 이미지 URL 필드 추가
     )
+    
 # Base64 데이터를 디코딩하고 파일로 저장/업로드하는 더미 비동기 함수
 @database_sync_to_async
 def save_base64_image_and_get_url(user_id, base64_data):
@@ -51,13 +52,6 @@ def save_base64_image_and_get_url(user_id, base64_data):
         return None, None # 오류 발생 시 None 반환
 
     # [TODO: S3/Storage 실제 업로드 로직]
-    # 여기서는 디버깅을 위해 로컬에 저장한다고 가정
-    # file_name = f"user_{user_id}_{uuid.uuid4().hex}.jpg"
-    # file_path = os.path.join(settings.MEDIA_ROOT, 'chat_images', file_name)
-    # with open(file_path, 'wb') as f:
-    #     f.write(decoded_image_bytes)
-    # final_image_url = f"/media/chat_images/{file_name}" # 서버 내부 URL
-    
     # 실제 환경에서는 S3에 업로드하고 외부 URL 반환
     final_image_url = f"https://your-storage.com/images/user_{user_id}_{int(time.time())}.jpg"
     
@@ -65,8 +59,6 @@ def save_base64_image_and_get_url(user_id, base64_data):
     # Base64 문자열 자체를 전달해도 되고, 바이트를 전달해도 됩니다.
     # 여기서는 Base64 문자열을 그대로 반환하여 AI 서비스에서 처리한다고 가정
     return final_image_url, image_data # Base64 문자열 반환
-
-
 
 User = get_user_model()
 
@@ -101,7 +93,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
             # ai_profile 로드 확인 (페르소나 적용에 필수)
             if not hasattr(self.user, 'ai_profile') or self.user.ai_profile is None:
-                 print(f"경고: User {self.user.username}에 연결된 Profile 객체가 없습니다. 동적 페르소나 적용 불가.")
+                print(f"경고: User {self.user.username}에 연결된 Profile 객체가 없습니다. 동적 페르소나 적용 불가.")
                 
             await self.accept() # 토큰 유효 시 연결 승인
             
@@ -127,65 +119,82 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
     # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive(self, text_data):
-            
-        if not self.ai_service:
-            await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
-            return
-            
+        # 🚨 [CRITICAL FIX] 최상위 try-except 블록을 사용하여 Consumer가 죽는 것을 방지
         try:
+            if not self.ai_service:
+                await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
+                return
+                
             data = json.loads(text_data)
             message_type = data.get('type') 
             user_message = data.get('message')
             
-            #  Flutter에서 전송한 필드들
+            #  Flutter에서 전송한 필드들
             image_base64 = data.get('image_base64')
             chat_history = data.get('history', []) # JSON 배열 형태
             
+            # 메시지 타입 및 내용 유효성 검사
             if message_type != 'chat_message' or not user_message:
-                await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format."}))
-                return
+                if not image_base64: # 이미지도 메시지도 없으면 무시
+                    await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format or empty message."}))
+                    return
             
-
+            
             # -----------------------------------------------------------------
             # [신규] Base64 이미지 처리 및 URL 획득
             # -----------------------------------------------------------------
+            final_image_url = None
+            user_image_data_for_ai = None
             if image_base64:
                 # 비동기로 DB/S3에 이미지를 저장하고 최종 URL과 Base64 데이터를 획득
-                final_image_url, user_image_data_for_ai = await save_base64_image_and_get_url(
-                    self.user.id, 
-                    image_base64
-                )
-                if not final_image_url:
-                    raise Exception("이미지 저장/업로드에 실패했습니다.")
+                try:
+                    final_image_url, user_image_data_for_ai = await save_base64_image_and_get_url(
+                        self.user.id, 
+                        image_base64
+                    )
+                    if not final_image_url:
+                         # 이미지 저장 실패는 여기서 처리하여 아래에서 raise Exception을 피함
+                        print("이미지 저장/업로드 실패: URL이 반환되지 않았습니다.")
+                        user_image_data_for_ai = None # AI에 전달할 데이터도 무효화
+                except Exception as e:
+                    print(f"이미지 처리 과정 중 예외 발생: {e}")
+                    # 예외 발생 시 크래시를 막고 None으로 처리하여 진행
+                    final_image_url = None
+                    user_image_data_for_ai = None
             
 
             # -----------------------------------------------------------------
-            #  [컨텍스트 검색 및 추가]
+            # [컨텍스트 검색 및 추가]
             # -----------------------------------------------------------------
             # 1. 활동 기록 검색 (사용자의 과거 메모, 장소 등 검색)
-            activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)            
+            activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)         
             # 2. 활동 추천 컨텍스트 (최근 방문 장소 분석)
             recommendation_context = await database_sync_to_async(get_activity_recommendation)(self.user, user_message)
             
-            # 3. AI 서비스 호출 시 image_base64 전달
-            # DB에 저장할 URL과 LLM에 전달할 이미지 데이터를 구분합니다.
-            system_context = self.ai_service.get_ai_response_stream(
-                user_message,
-                chat_history, 
-                image_base64=user_image_data_for_ai, # Base64 데이터 전달
-                system_context=system_context.strip() 
-            )
+            # 3. 컨텍스트 조합 (LLM System Context에 추가될 부분)
+            context_list = []
+            if activity_context:
+                context_list.append(activity_context)
+            if recommendation_context:
+                context_list.append(recommendation_context)
+                
+            # 최종 시스템 컨텍스트 문자열
+            final_system_context = "\n".join(context_list) if context_list else None
+            
+            # -----------------------------------------------------------------
+            # [AI 서비스 호출 및 스트리밍]
             # -----------------------------------------------------------------
             
-            #  AI 서비스 호출 시 history, image_url, system_context 전달
+            # 🚨 [CRITICAL FIX] 이전 코드에서 정의되지 않은 system_context를 사용하던 부분을 final_system_context로 교체
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message,
                 chat_history, # Flutter에서 받은 JSON 배열
-                image_base64=user_image_data_for_ai,
-                system_context=system_context.strip() # DB에서 찾은 컨텍스트
+                image_base64=user_image_data_for_ai, # Base64 데이터 전달
+                # 새로 조합된 컨텍스트 전달 (없으면 None 전달)
+                system_context=final_system_context.strip() if final_system_context else None
             )
             
-            # 사용자 메시지 DB 저장 시 image_url도 함께 저장
+            # 사용자 메시지 DB 저장 시 image_url도 함께 저장 (이미지 처리가 성공했을 경우에만 URL이 존재)
             await save_message(self.user, user_message, 'user', image_url=final_image_url)
             
             # 스트림 처리
@@ -216,8 +225,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
         except Exception as e:
             error_message = f"AI 처리 오류 발생: {e}"
-            print(traceback.format_exc()) # 💡 상세 에러 출력을 위해 추가
-            # 오류 발생 시 '슬픔' 감정을 전송
+            # 💡 [DEBUGGING] 상세 에러 출력을 위해 traceback.format_exc()를 사용
+            print(f"--- [CRITICAL CONSUMER CRASH] Unhandled Exception in receive: ---")
+            print(traceback.format_exc()) 
+            
+            # 오류 발생 시 클라이언트에 에러 알림 후 '슬픔' 감정 전송
+            await self.send(text_data=json.dumps({
+                "type": "error",
+                "message": f"Server Error: {type(e).__name__}. Check console logs."
+            }))
             await self.send(text_data=json.dumps({
                 "type": "message_complete", # 에러 대신 complete를 보내야 Flutter가 대기 상태를 풂
                 "emotion": "슬픔"
