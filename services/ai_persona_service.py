@@ -1,4 +1,4 @@
-#app_server/services/ai_persona_service.py
+#services/ai_persona_service.py
 import json
 import asyncio
 from openai import AsyncOpenAI
@@ -24,20 +24,20 @@ class AIPersonaService:
     """
     인증된 Django User 객체를 기반으로 동적 페르소나 및 RAG를 적용하여 
     GPT API 호출을 관리하는 핵심 서비스 클래스입니다.
+    이 클래스는 이제 자체적으로 History를 유지하지 않고, 클라이언트에서 전달받은
+    History를 사용합니다. (Stateless에 가까움)
     """
     def __init__(self, user: Any, api_key: str):
         # 🚨 Django User 객체 저장 (프로필 데이터 접근 가능)
         self.user = user 
         self.openai_client = AsyncOpenAI(api_key=api_key) 
-        self.chat_session: List[Dict[str, Any]] = [] # Any로 타입 힌트 변경
+        
+        # ❌ self.chat_session 제거: History 관리는 이제 클라이언트/Consumers에서 담당
         
         # 💡 각 세션마다 초기 시스템 프롬프트를 미리 생성
         self._system_prompt_base = self._build_base_system_prompt()
-        self._initialize_session() 
 
-    def _initialize_session(self):
-        """세션 시작 시 대화 히스토리를 초기화합니다."""
-        self.chat_session = []
+    # _initialize_session 메서드는 이제 불필요하므로 제거
 
     def _get_affinity_score(self) -> int:
         """User 객체에서 호감도 점수를 안전하게 추출합니다."""
@@ -52,6 +52,7 @@ class AIPersonaService:
         """
         AI 캐릭터 '아이'의 시스템 프롬프트를 생성하며, 호감도에 따라 페르소나 및 
         RAG/JSON 지침을 동적으로 조정하여 전체 기본 프롬프트를 구성합니다.
+        (로직 변경 없음)
         """
         username = self.user.username
         affinity = self._get_affinity_score()
@@ -98,8 +99,8 @@ class AIPersonaService:
             "너의 최종 응답은 다른 어떤 텍스트도 없이, 오직 다음 JSON 객체 형식으로 제공해야 해. JSON 앞이나 뒤에 다른 말을 붙이지 마. 오직 JSON 객체만 출력해야 해.\n"
             "```json\n"
             "{\n"
-            f'  "answer": "{username}님에게 보낼 최종 답변 내용.",\n'
-            '  "explanation": "answer를 생성할 때 참고한 주요 정보(예: 사용자 기억, RAG 컨텍스트 등)를 1~2문장으로 간략하게 설명."\n'
+            f'  "answer": "{username}님에게 보낼 최종 답변 내용.",\n'
+            '  "explanation": "answer를 생성할 때 참고한 주요 정보(예: 사용자 기억, RAG 컨텍스트 등)를 1~2문장으로 간략하게 설명."\n'
             "}\n"
             "```"
         )
@@ -110,6 +111,7 @@ class AIPersonaService:
     async def _build_full_system_prompt(self, user_message: str) -> str:
         """
         기본 페르소나/규칙, RAG 문맥을 결합하여 최종 시스템 프롬프트를 생성합니다.
+        (로직 변경 없음)
         """
         # 1. Request context from RAG service
         context = await rag_service.get_context_documents(user_message)
@@ -127,21 +129,21 @@ class AIPersonaService:
         return final_prompt
 
     
-    def _build_messages_for_api(self, system_prompt_content: str, user_message: str, image_base64: str = None) -> List[Dict[str, Any]]:
+    def _build_messages_for_api(self, system_prompt_content: str, user_message: str, history: List[Dict[str, Any]], image_base64: str = None) -> List[Dict[str, Any]]:
         """
-        시스템 프롬프트, 채팅 히스토리, 현재 사용자 메시지 (멀티모달 포함)를 
+        시스템 프롬프트, 클라이언트가 보낸 전체 채팅 히스토리, 현재 사용자 메시지를 
         OpenAI API의 'messages' 형식으로 변환합니다.
         """
         
         # 1. System Prompt (최상단)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt_content}]
         
-        # 2. Previous History (Text only)
-        # self.chat_session에는 이전 대화의 텍스트만 저장되어 있습니다.
-        messages.extend(self.chat_session)
+        # 2. Previous History (Client provided)
+        # 클라이언트가 보낸 history를 그대로 사용합니다.
+        messages.extend(history)
             
         # 3. Current User Message (Multimodal or Text-only)
-        current_user_content: List[Dict[str, str]] = []
+        current_user_content: List[Dict[str, Any]] = [] # Dict[str, str] -> Dict[str, Any] 변경
         
         # 이미지 데이터가 있을 경우, 첫 번째 part로 추가
         if image_base64:
@@ -168,23 +170,26 @@ class AIPersonaService:
         return messages
 
 
-    async def get_ai_response_stream(self, user_message: str, image_base64: str = None) -> AsyncGenerator[str, None]:
+    async def get_ai_response_stream(self, user_message: str, history: List[Dict[str, Any]], image_base64: str = None) -> AsyncGenerator[str, None]:
         """
         사용자 메시지를 받고, GPT API에 요청하며, 응답을 스트림으로 yield 합니다.
+        History는 인자로 외부에서 전달받습니다.
         """
         
         full_json_response_text = ""
         
-        # 🚨 주의: 메시지를 세션에 미리 추가하지 않고, 응답이 성공한 후 추가합니다.
+        # 🚨 주의: History는 클라이언트가 전달했으며, API 호출이 성공한 후 세션에 추가할 필요가 없습니다. (클라이언트가 다음번에 다시 보낼 것이므로)
         
         try:
             # 1. Generate dynamic system prompt including RAG context
             system_prompt_content = await self._build_full_system_prompt(user_message)
             
             # 2. Prepare messages for API (Multimodal ready)
+            # 클라이언트가 제공한 history를 전달합니다.
             messages_to_send = self._build_messages_for_api(
                 system_prompt_content,
                 user_message,
+                history, # ✅ 수정된 부분: history 인자 추가
                 image_base64
             )
             
@@ -233,13 +238,7 @@ class AIPersonaService:
                     yield final_answer
                     return 
 
-            # 6. If successful, save the conversation to the session
-            if "서버 오류" not in final_answer:
-                # 세션에 저장할 때는 텍스트만 저장 (다음 턴에서 멀티모달 처리를 간소화하기 위해)
-                # 현재 사용자의 텍스트 메시지를 먼저 저장
-                self.chat_session.append({"role": "user", "content": user_message})
-                # AI의 최종 답변 텍스트 저장
-                self.chat_session.append({"role": "assistant", "content": final_answer}) 
+            # 6. Save conversation to session 로직 제거 (클라이언트가 관리하므로)
             
             # 7. Stream the final answer back to the client
             for char in final_answer:
@@ -248,5 +247,5 @@ class AIPersonaService:
         except Exception as e:
             error_msg = f"GPT API 호출 오류: {e}"
             print(error_msg)
-            # 오류 발생 시 세션에 추가하지 않고 사용자에게 에러 메시지 전달
+            # 오류 발생 시 사용자에게 에러 메시지 전달
             yield error_msg
