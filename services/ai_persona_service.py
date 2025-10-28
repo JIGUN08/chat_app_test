@@ -12,8 +12,6 @@ from .rag_service import RAGService
 # 상수 및 초기화
 # -------------------------------------------------------------------------
 
-# GPT 응답 형식에 대한 JSON 지침 (한국어 페르소나 프롬프트 내에 포함됨)
-# 기존 영어 JSON_FORMAT_INSTRUCTION은 제거하고, 한국어 프롬프트 내의 지침을 사용합니다.
 MOCK_API_KEY = "mock-api-key" 
 MOCK_ENV_VARS = {"PINECONE_ENV": "mock-env"}
 rag_service = RAGService(MOCK_API_KEY, MOCK_ENV_VARS)
@@ -31,7 +29,7 @@ class AIPersonaService:
         # 🚨 Django User 객체 저장 (프로필 데이터 접근 가능)
         self.user = user 
         self.openai_client = AsyncOpenAI(api_key=api_key) 
-        self.chat_session: List[Dict[str, str]] = []
+        self.chat_session: List[Dict[str, Any]] = [] # Any로 타입 힌트 변경
         
         # 💡 각 세션마다 초기 시스템 프롬프트를 미리 생성
         self._system_prompt_base = self._build_base_system_prompt()
@@ -44,7 +42,6 @@ class AIPersonaService:
     def _get_affinity_score(self) -> int:
         """User 객체에서 호감도 점수를 안전하게 추출합니다."""
         # user.ai_profile.affinity_score를 사용하도록 가정
-        # user.ai_profile이 존재하지 않을 경우를 대비해 안전하게 접근
         try:
             return getattr(getattr(self.user, 'ai_profile', None), 'affinity_score', 0)
         except AttributeError:
@@ -90,7 +87,7 @@ class AIPersonaService:
             "**고급 어휘 구사:** 단순하고 반복적인 표현을 지양하고, 상황에 맞는 한자어나 비유법을 사용해. {username}님이 사용하는 어려운 표현이나 비유도 완벽하게 이해하고 그에 맞춰 응수해.\n"
         ]
         
-        # 4. RAG 및 JSON 응답 형식 지침 (두 번째 스니펫에서 가져옴)
+        # 4. RAG 및 JSON 응답 형식 지침
         rag_json_instructions = (
             "\n## 대화 처리 원칙 (RAG 컨텍스트 활용) ##\n"
             "1. **컨텍스트의 자연스러운 활용:** RAG나 사용자 속성 같은 컨텍스트 정보는 대화의 흐름과 **직접적인 연관이 있을 때만** 언급하거나 활용해. 관련 없는 주제에 억지로 연결하지 마. 항상 대화의 주된 흐름을 방해하지 않는 선에서, 꼭 필요할 때만 배경지식을 활용해.\n"
@@ -101,8 +98,8 @@ class AIPersonaService:
             "너의 최종 응답은 다른 어떤 텍스트도 없이, 오직 다음 JSON 객체 형식으로 제공해야 해. JSON 앞이나 뒤에 다른 말을 붙이지 마. 오직 JSON 객체만 출력해야 해.\n"
             "```json\n"
             "{\n"
-            f'  "answer": "{username}님에게 보낼 최종 답변 내용.",\n'
-            '  "explanation": "answer를 생성할 때 참고한 주요 정보(예: 사용자 기억, RAG 컨텍스트 등)를 1~2문장으로 간략하게 설명."\n'
+            f'  "answer": "{username}님에게 보낼 최종 답변 내용.",\n'
+            '  "explanation": "answer를 생성할 때 참고한 주요 정보(예: 사용자 기억, RAG 컨텍스트 등)를 1~2문장으로 간략하게 설명."\n'
             "}\n"
             "```"
         )
@@ -126,44 +123,87 @@ class AIPersonaService:
         )
 
         # 3. Combine all elements into the final system prompt.
-        # base_prompt에는 이미 페르소나, RAG 활용 지침, JSON 형식이 포함되어 있습니다.
         final_prompt = f"{self._system_prompt_base}{rag_context_block}"
         return final_prompt
 
+    
+    def _build_messages_for_api(self, system_prompt_content: str, user_message: str, image_base64: str = None) -> List[Dict[str, Any]]:
+        """
+        시스템 프롬프트, 채팅 히스토리, 현재 사용자 메시지 (멀티모달 포함)를 
+        OpenAI API의 'messages' 형식으로 변환합니다.
+        """
+        
+        # 1. System Prompt (최상단)
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt_content}]
+        
+        # 2. Previous History (Text only)
+        # self.chat_session에는 이전 대화의 텍스트만 저장되어 있습니다.
+        messages.extend(self.chat_session)
+            
+        # 3. Current User Message (Multimodal or Text-only)
+        current_user_content: List[Dict[str, str]] = []
+        
+        # 이미지 데이터가 있을 경우, 첫 번째 part로 추가
+        if image_base64:
+            # OpenAI 형식: data:image/jpeg;base64,{base64_data}
+            current_user_content.append({
+                "type": "image_url",
+                # 일반적으로 image/jpeg을 사용하지만, 필요에 따라 image/png 등 다른 MIME 타입을 지정해야 할 수 있습니다.
+                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+            })
+            
+        # 사용자 메시지 텍스트 추가
+        current_user_content.append({
+            "type": "text",
+            "text": user_message
+        })
 
-    async def get_ai_response_stream(self, user_message: str) -> AsyncGenerator[str, None]:
+        # 최종 사용자 메시지 추가
+        messages.append({
+            "role": "user",
+            # content는 멀티모달 포맷을 위해 List[Dict]를 사용합니다.
+            "content": current_user_content
+        })
+        
+        return messages
+
+
+    async def get_ai_response_stream(self, user_message: str, image_base64: str = None) -> AsyncGenerator[str, None]:
         """
         사용자 메시지를 받고, GPT API에 요청하며, 응답을 스트림으로 yield 합니다.
         """
         
-        # 1. Add user message to session
-        self.chat_session.append({"role": "user", "content": user_message})
-        
         full_json_response_text = ""
         
+        # 🚨 주의: 메시지를 세션에 미리 추가하지 않고, 응답이 성공한 후 추가합니다.
+        
         try:
-            # 2. Generate dynamic system prompt including RAG context
+            # 1. Generate dynamic system prompt including RAG context
             system_prompt_content = await self._build_full_system_prompt(user_message)
             
-            # 3. Prepare messages for API (System prompt first)
-            messages_to_send = [{"role": "system", "content": system_prompt_content}] + self.chat_session
+            # 2. Prepare messages for API (Multimodal ready)
+            messages_to_send = self._build_messages_for_api(
+                system_prompt_content,
+                user_message,
+                image_base64
+            )
             
-            # 4. GPT API Async Streaming Call
+            # 3. GPT API Async Streaming Call
             stream = await self.openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o", # 멀티모달 지원 모델
                 messages=messages_to_send, 
                 stream=True,
                 # 응답을 JSON 객체로 받도록 강제 (모델 레벨)
                 response_format={"type": "json_object"}, 
             )
 
-            # 5. Collect stream chunks
+            # 4. Collect stream chunks
             async for chunk in stream:
                 content = chunk.choices[0].delta.content
                 if content:
                     full_json_response_text += content
                     
-            # 6. JSON Parsing and 'answer' Extraction (Robust Recovery Logic 포함)
+            # 5. JSON Parsing and 'answer' Extraction (Robust Recovery Logic 포함)
             final_answer = ""
             try:
                 # LLM이 ```json ... ```으로 감싸서 보내는 경우 처리
@@ -190,23 +230,23 @@ class AIPersonaService:
                     error_msg = f"❌ JSON decoding and repair failed: {e}"
                     print(error_msg)
                     final_answer = "서버 오류: AI 응답 형식이 심각하게 손상되었습니다."
-                    self.chat_session.pop() 
                     yield final_answer
                     return 
 
-            # 7. If successful, save the assistant's 'answer' to the session
+            # 6. If successful, save the conversation to the session
             if "서버 오류" not in final_answer:
-                # 세션에 저장할 때는 JSON이 아닌 실제 답변 텍스트만 저장
+                # 세션에 저장할 때는 텍스트만 저장 (다음 턴에서 멀티모달 처리를 간소화하기 위해)
+                # 현재 사용자의 텍스트 메시지를 먼저 저장
+                self.chat_session.append({"role": "user", "content": user_message})
+                # AI의 최종 답변 텍스트 저장
                 self.chat_session.append({"role": "assistant", "content": final_answer}) 
             
-            # 8. Stream the final answer back to the client
+            # 7. Stream the final answer back to the client
             for char in final_answer:
                 yield char
                 
         except Exception as e:
             error_msg = f"GPT API 호출 오류: {e}"
             print(error_msg)
-            # 사용자 메시지를 세션에서 제거하여 재시도 가능하게 함
-            if self.chat_session and self.chat_session[-1]['role'] == 'user':
-                self.chat_session.pop() 
+            # 오류 발생 시 세션에 추가하지 않고 사용자에게 에러 메시지 전달
             yield error_msg
