@@ -105,9 +105,27 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format or empty message."}))
                 return
             
-            
+
             # -----------------------------------------------------------------
-            # [핵심 수정 3]: Base64 이미지 처리 로직만 남김 (저장 로직 제거)
+            #  user_message 유효성 및 타입 검사 (TypeError 방지)
+            # -----------------------------------------------------------------
+            # None이거나 비어있는 문자열이면 'Image only'로 대체합니다.
+            if not user_message or not isinstance(user_message, str):
+                if image_base64:
+                    user_message_to_save = "[이미지만 전송]" # DB에 저장할 대체 텍스트
+                    user_message_for_ai = "" # AI에게는 텍스트가 없다고 알림
+                else:
+                    # 이 경우는 이미 위에서 Invalid message로 걸러졌어야 하지만, 혹시 몰라 추가 방어
+                    print("ERROR: 메시지 내용과 이미지가 모두 비어있습니다.")
+                    return
+            else:
+                user_message_to_save = user_message
+                user_message_for_ai = user_message
+            
+            
+
+            # -----------------------------------------------------------------
+            # Base64 이미지 처리
             # -----------------------------------------------------------------
             
             if image_base64:
@@ -122,11 +140,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
             # [AI 서비스 호출 및 스트리밍]
             # -----------------------------------------------------------------
             
-            await save_message(self.user, user_message, 'user')
+            await save_message(self.user, user_message_to_save, 'user')
             
             # AI 서비스 호출: Base64 데이터는 LLM에게만 전달됨
             stream_generator = self.ai_service.get_ai_response_stream(
-                user_message=user_message,
+                user_message=user_message_for_ai,
                 image_base64=user_image_data_for_ai 
             )
             
