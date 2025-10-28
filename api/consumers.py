@@ -89,7 +89,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
     # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive(self, text_data):
-        print(f"--- [DEBUG] RECEIVE START: {text_data[:50]}...")
+        # 🚨 [디버깅 코드 개선]: receive 함수 진입을 확실하게 로그에 남깁니다.
+        # slicing 오류 방지를 위해 전체 text_data를 출력합니다.
+        print(f"--- [DEBUG] RECEIVE START. Data: {text_data}")
+
         try:
             if not self.ai_service:
                 await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
@@ -99,51 +102,47 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
             data = json.loads(text_data)
             message_type = data.get('type') 
-            user_message = data.get('message')
+            user_message = data.get('message') # 👈 이 값이 None일 수 있음
             image_base64 = data.get('image_base64') # LLM에 전달할 Base64 데이터
             
-            if message_type != 'chat_message' or (not user_message and not image_base64): 
+            # 1. 기본 유효성 검사
+            # user_message와 image_base64가 모두 None이면 에러를 반환합니다.
+            if message_type != 'chat_message' or (user_message is None and image_base64 is None):
                 await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format or empty message."}))
                 return
-            
 
-            # -----------------------------------------------------------------
-            #  user_message 유효성 및 타입 검사 (TypeError 방지)
-            # -----------------------------------------------------------------
-            # None이거나 비어있는 문자열이면 'Image only'로 대체합니다.
-            if not user_message or not isinstance(user_message, str):
-                if image_base64:
-                    user_message_to_save = "[이미지만 전송]" # DB에 저장할 대체 텍스트
-                    user_message_for_ai = "" # AI에게는 텍스트가 없다고 알림
-                else:
-                    # 이 경우는 이미 위에서 Invalid message로 걸러졌어야 하지만, 혹시 몰라 추가 방어
-                    print("ERROR: 메시지 내용과 이미지가 모두 비어있습니다.")
-                    return
-            else:
+            # 2. 메시지/이미지 상태에 따른 변수 설정 (NoneType 방지)
+            user_message_to_save = None # DB 저장을 위한 텍스트
+            user_message_for_ai = None # AI 호출을 위한 텍스트
+
+            if user_message and isinstance(user_message, str):
+                # 유효한 텍스트 메시지인 경우
                 user_message_to_save = user_message
                 user_message_for_ai = user_message
+            elif image_base64:
+                # 텍스트 없이 이미지만 전송된 경우 (DB에 저장할 내용 필요)
+                user_message_to_save = "[이미지만 전송]"
+                user_message_for_ai = "" # AI에게는 빈 텍스트를 전달
+            else:
+                # 메시지 내용과 이미지가 모두 유효하지 않은 경우 (1번에서 걸러졌어야 함)
+                await self.send(text_data=json.dumps({"type": "error", "message": "Message content missing."}))
+                return
             
-            
-
-            # -----------------------------------------------------------------
-            # Base64 이미지 처리
-            # -----------------------------------------------------------------
-            
+            # 3. Base64 이미지 데이터 정리
             if image_base64:
                 # Base64 데이터를 정제하여 AI 서비스에 바로 전달할 준비
                 clean_image_base64 = image_base64.strip() if isinstance(image_base64, str) else image_base64
                 if clean_image_base64 and clean_image_base64.lower() not in ('none', '없음'):
                     user_image_data_for_ai = clean_image_base64
             
-            # ... (컨텍스트 검색 및 추가 로직은 변경 없음)
-            
             # -----------------------------------------------------------------
             # [AI 서비스 호출 및 스트리밍]
             # -----------------------------------------------------------------
             
+            # 💡 [핵심 수정 3]: 유효한 문자열을 DB에 저장 (TypeError 방지)
             await save_message(self.user, user_message_to_save, 'user')
             
-            # AI 서비스 호출: Base64 데이터는 LLM에게만 전달됨
+            # AI 서비스 호출: user_message_for_ai는 문자열임을 보장
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message=user_message_for_ai,
                 image_base64=user_image_data_for_ai 
@@ -160,7 +159,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
             final_bot_message = "".join(full_ai_response_chunks)
 
-            await save_message(self.user, final_bot_message, 'ai')
+            # 💡 AI 응답도 유효한 문자열인지 확인 후 저장
+            if final_bot_message:
+                await save_message(self.user, final_bot_message, 'ai')
+            else:
+                print("Warning: Received empty response from AI service.")
+
 
             # ... (감정 분석 및 완료 신호 전송 로직 생략)
             emotion_label = await database_sync_to_async(analyze_emotion)(final_bot_message)
@@ -171,7 +175,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         except Exception as e:
             # ... (오류 처리 로직 생략)
-            error_message = f"AI 처리 오류 발생: {e}"
             print(f"--- [CRITICAL CONSUMER CRASH] Unhandled Exception in receive: ---")
             print(traceback.format_exc()) 
             
