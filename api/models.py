@@ -36,8 +36,6 @@ class ChatMessage(models.Model):
     sender = models.CharField(max_length=10, choices=[('user', 'User'), ('ai', 'AI')])
     timestamp = models.DateTimeField(auto_now_add=True)
     
-    # ⭐️ [추가] 멀티모달 지원을 위한 이미지 URL 필드
-    image_url = models.URLField(max_length=500, null=True, blank=True) 
 
     def __str__(self):
         return f"{self.user.username}: {self.content[:30]}"
