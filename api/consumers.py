@@ -8,17 +8,17 @@ from django.conf import settings
 from channels.db import database_sync_to_async 
 import json
 import asyncio
-import traceback # 💡 디버깅을 위해 임포트
+import traceback #  디버깅을 위해 임포트
+import base64 
+import os
 
 # AI 서비스 파일 임포트 (통합된 파일 사용)
 from services.ai_persona_service import AIPersonaService 
-
 from services.emotion_service import analyze_emotion
-
-# ⭐️ [신규] context_service 임포트
+# context_service 임포트
 from services.context_service import search_activities_for_context, get_activity_recommendation
 
-# ⭐️ [수정] DB에 이미지 URL 저장을 위해 필드 추가
+# DB에 이미지 URL 저장을 위해 필드 추가
 @database_sync_to_async
 def save_message(user, content, sender, image_url=None):
     ChatMessage.objects.create(
@@ -27,6 +27,45 @@ def save_message(user, content, sender, image_url=None):
         sender=sender, 
         image_url=image_url # 이미지 URL 필드 추가
     )
+# Base64 데이터를 디코딩하고 파일로 저장/업로드하는 더미 비동기 함수
+@database_sync_to_async
+def save_base64_image_and_get_url(user_id, base64_data):
+    """
+    Base64 데이터를 디코딩하여 서버/S3에 저장하고, 저장된 이미지의 URL을 반환합니다.
+    (실제 S3/Storage 로직으로 대체해야 합니다.)
+    """
+    import uuid
+    import time
+    
+    # Base64 MIME 타입 헤더 제거
+    if ';base64,' in base64_data:
+        _, image_data = base64_data.split(';base64,')
+    else:
+        image_data = base64_data
+    
+    # Base64 디코딩
+    try:
+        decoded_image_bytes = base64.b64decode(image_data)
+    except Exception as e:
+        print(f"Base64 디코딩 오류: {e}")
+        return None, None # 오류 발생 시 None 반환
+
+    # [TODO: S3/Storage 실제 업로드 로직]
+    # 여기서는 디버깅을 위해 로컬에 저장한다고 가정
+    # file_name = f"user_{user_id}_{uuid.uuid4().hex}.jpg"
+    # file_path = os.path.join(settings.MEDIA_ROOT, 'chat_images', file_name)
+    # with open(file_path, 'wb') as f:
+    #     f.write(decoded_image_bytes)
+    # final_image_url = f"/media/chat_images/{file_name}" # 서버 내부 URL
+    
+    # 실제 환경에서는 S3에 업로드하고 외부 URL 반환
+    final_image_url = f"https://your-storage.com/images/user_{user_id}_{int(time.time())}.jpg"
+    
+    # LLM에 전달할 이미지 바이트
+    # Base64 문자열 자체를 전달해도 되고, 바이트를 전달해도 됩니다.
+    # 여기서는 Base64 문자열을 그대로 반환하여 AI 서비스에서 처리한다고 가정
+    return final_image_url, image_data # Base64 문자열 반환
+
 
 
 User = get_user_model()
@@ -98,53 +137,64 @@ class ChatConsumer(AsyncWebsocketConsumer):
             message_type = data.get('type') 
             user_message = data.get('message')
             
-            # ⭐️ [신규] Flutter에서 전송한 필드들
-            image_url = data.get('image_url')
+            #  Flutter에서 전송한 필드들
+            image_base64 = data.get('image_base64')
             chat_history = data.get('history', []) # JSON 배열 형태
             
             if message_type != 'chat_message' or not user_message:
                 await self.send(text_data=json.dumps({"type": "error", "message": "Invalid message format."}))
                 return
+            
 
             # -----------------------------------------------------------------
-            # ⭐️ [컨텍스트 검색 및 추가]
+            # [신규] Base64 이미지 처리 및 URL 획득
+            # -----------------------------------------------------------------
+            if image_base64:
+                # 비동기로 DB/S3에 이미지를 저장하고 최종 URL과 Base64 데이터를 획득
+                final_image_url, user_image_data_for_ai = await save_base64_image_and_get_url(
+                    self.user.id, 
+                    image_base64
+                )
+                if not final_image_url:
+                    raise Exception("이미지 저장/업로드에 실패했습니다.")
+            
+
+            # -----------------------------------------------------------------
+            #  [컨텍스트 검색 및 추가]
             # -----------------------------------------------------------------
             # 1. 활동 기록 검색 (사용자의 과거 메모, 장소 등 검색)
-            activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)
-            
+            activity_context = await database_sync_to_async(search_activities_for_context)(self.user, user_message)            
             # 2. 활동 추천 컨텍스트 (최근 방문 장소 분석)
             recommendation_context = await database_sync_to_async(get_activity_recommendation)(self.user, user_message)
             
-            # 3. 모든 컨텍스트를 하나로 결합
-            system_context = ""
-            if activity_context:
-                system_context += activity_context + " "
-            if recommendation_context:
-                system_context += recommendation_context + " "
-                
+            # 3. AI 서비스 호출 시 image_base64 전달
+            # DB에 저장할 URL과 LLM에 전달할 이미지 데이터를 구분합니다.
+            system_context = self.ai_service.get_ai_response_stream(
+                user_message,
+                chat_history, 
+                image_base64=user_image_data_for_ai, # Base64 데이터 전달
+                system_context=system_context.strip() 
+            )
             # -----------------------------------------------------------------
             
-            # ⭐️ [수정] AI 서비스 호출 시 history, image_url, system_context 전달
+            #  AI 서비스 호출 시 history, image_url, system_context 전달
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message,
                 chat_history, # Flutter에서 받은 JSON 배열
-                image_url=image_url,
+                image_base64=user_image_data_for_ai,
                 system_context=system_context.strip() # DB에서 찾은 컨텍스트
             )
-
-            # AI 응답 청크를 조립(저장)하기 위한 변수
-            full_ai_response_chunks = []
-
-            # ⭐️ [수정] 사용자 메시지 DB 저장 시 image_url도 함께 저장
-            await save_message(self.user, user_message, 'user', image_url=image_url)
+            
+            # 사용자 메시지 DB 저장 시 image_url도 함께 저장
+            await save_message(self.user, user_message, 'user', image_url=final_image_url)
             
             # 스트림 처리
+            full_ai_response_chunks = []  # AI 응답 청크를 조립(저장)하기 위한 변수
             async for chunk in stream_generator:
                 await self.send(text_data=json.dumps({
                     "type": "chat_message",
                     "message": chunk
                 }))
-
                 # 서버에 청크 저장 (조립)
                 full_ai_response_chunks.append(chunk)
 
