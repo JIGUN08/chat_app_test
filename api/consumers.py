@@ -89,6 +89,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
     # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive(self, text_data):
+        print(f"--- [DEBUG] RECEIVE START: {text_data[:50]}...")
         try:
             if not self.ai_service:
                 await self.send(text_data=json.dumps({"type": "error", "message": "Service not initialized."}))
