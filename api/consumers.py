@@ -11,7 +11,7 @@ import base64
 import os
 
 from services.ai_persona_service import AIPersonaService 
-from services.emotion_service import analyze_emotion
+from services.emotion_service import analyze_emotion # <-- 여전히 임포트되어 있지만, 아래에서 호출되지 않음
 from services.context_service import search_activities_for_context, get_activity_recommendation 
 
 
@@ -85,7 +85,6 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             
     # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive_json(self, content):
-        # 🚨 [디버깅 코드]: receive 함수 진입을 확실하게 로그에 남깁니다.
         print(f"--- [DEBUG] RECEIVE_JSON START. Data: {content}")
 
         try:
@@ -131,7 +130,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             
             # DB에 저장 (User Message)
             await save_message(self.user, user_message_to_save, 'user')
-            print("--- [DEBUG] USER MESSAGE SAVED.") # 👈 디버그 로그 추가
+            print("--- [DEBUG] USER MESSAGE 1/5: SAVED.") 
 
             stream_generator = self.ai_service.get_ai_response_stream(
                 user_message=user_message_for_ai,
@@ -149,25 +148,29 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 full_ai_response_chunks.append(chunk)
 
             final_bot_message = "".join(full_ai_response_chunks)
-            print("--- [DEBUG] STREAMING COMPLETE. Final message length:", len(final_bot_message)) # 👈 디버그 로그 추가
+            print("--- [DEBUG] STREAMING 2/5: COMPLETE. Final message length:", len(final_bot_message))
 
             # AI 응답 저장
             if final_bot_message:
                 await save_message(self.user, final_bot_message, 'ai')
-                print("--- [DEBUG] AI MESSAGE SAVED.") # 👈 디버그 로그 추가
+                print("--- [DEBUG] AI MESSAGE 3/5: SAVED.") 
             else:
                 print("Warning: Received empty response from AI service.")
-
-            # 감정 분석 및 완료 신호 전송 로직
-            print("--- [DEBUG] STARTING EMOTION ANALYSIS.") # 👈 디버그 로그 추가
-            emotion_label = await database_sync_to_async(analyze_emotion)(final_bot_message)
-            print(f"--- [DEBUG] EMOTION ANALYSIS COMPLETE. Label: {emotion_label}") # 👈 디버그 로그 추가
+                
+            # -----------------------------------------------------------------
+            # [감정 분석 격리 - 임시로 호출 우회]
+            # -----------------------------------------------------------------
+            print("--- [DEBUG] STARTING EMOTION ANALYSIS 4/5: (SKIPPING CALL).") 
+            # emotion_label = await database_sync_to_async(analyze_emotion)(final_bot_message) # 실제 호출은 주석 처리
+            emotion_label = "기쁨" # 임시 더미 값 사용
+            print(f"--- [DEBUG] EMOTION ANALYSIS 4/5: COMPLETE. Label: {emotion_label} (DUMMY)") 
             
+            # 완료 신호 전송
             await self.send_json({
                 "type": "message_complete",
                 "emotion": emotion_label
             })
-            print("--- [DEBUG] MESSAGE_COMPLETE SENT SUCCESSFULLY.") # 👈 디버그 로그 추가
+            print("--- [DEBUG] MESSAGE_COMPLETE 5/5: SENT SUCCESSFULLY.") 
 
         except Exception as e:
             print(f"--- [CRITICAL CONSUMER CRASH] Unhandled Exception in receive_json: ---")
