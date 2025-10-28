@@ -32,20 +32,23 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.ai_service = None
         self.user = None
+
+        # 1. 사용자 인증 및 연결 수락
         try:
-            # ... (인증 로직은 생략)
+            # Query String에서 토큰 추출
             query_string = self.scope['query_string'].decode()
             if 'token=' not in query_string:
-                 raise ValueError("토큰 쿼리 파라미터가 누락되었습니다.")
+                raise ValueError("토큰 쿼리 파라미터가 누락되었습니다.")
 
             token = query_string.split('token=')[1].split('&')[0]
             if not token:
-                 raise ValueError("토큰 없음")
+                raise ValueError("토큰 없음")
 
-            # JWT 토큰 검증 및 사용자 로드
+            # JWT 토큰 검증 및 사용자 ID 추출
             access_token = AccessToken(token)
             user_id = access_token['user_id']
             
+            # DB에서 사용자 정보 로드
             self.user = await database_sync_to_async(
                 User.objects.select_related('ai_profile').get
                 )(pk=user_id)
@@ -53,21 +56,36 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if not self.user.is_active:
                 raise ValueError("비활성화된 사용자")
             
-            await self.accept() # 토큰 유효 시 연결 승인
-            
+            # 인증 및 활성화 성공 시 연결 승인
+            await self.accept() 
+
+        # 인증 과정 중 발생하는 모든 오류 (JWT 오류, DB 오류, ValueError 등) 처리
         except Exception as e:
-            print(f"WebSocket 인증 실패: {e}")
-            await self.close(code=4000) # 인증 실패 시 연결 거부
+            # 💡 [핵심 수정 1]: 인증 오류 발생 시 에러 메시지 출력 후 바로 연결 종료
+            print(f"WebSocket 인증 오류: {e}")
+            await self.close()
+            return # 함수 실행 중단
+
+        # 2. AI 클라이언트 및 세션 설정 (인증 성공 시만 이 블록에 진입)
+        # 💡 [핵심 수정 2]: self.user가 유효한지 최종적으로 한 번 더 검사합니다.
+        if self.user is None:
+            print("WebSocket 연결 후, self.user가 None이어서 AI 서비스 초기화 실패.")
+            await self.close()
             return
 
-        # AI 클라이언트 및 세션 설정
         try:
+            # AI 서비스 초기화
             api_key = getattr(settings, 'OPENAI_API_KEY', None)
+            
+            # self.user가 None이 아님이 보장되므로 안전하게 접근 가능
             self.ai_service = AIPersonaService(self.user, api_key)
             print(f"WebSocket 연결 성공 및 서비스 초기화: User {self.user.username}")
+
         except Exception as e:
-            print(f"AI 서비스 초기화 오류: {e}")
+            # AI 서비스 초기화 중 발생하는 오류 (ex: API 키 오류) 처리
+            print(f"AI 서비스 초기화 오류 (2단계): {e}")
             await self.close()
+            return # 함수 실행 중단
             
     # 메시지 수신 (GPT API 호출 및 스트리밍 응답)
     async def receive(self, text_data):
